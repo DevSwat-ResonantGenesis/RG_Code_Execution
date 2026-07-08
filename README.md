@@ -1,6 +1,6 @@
 # RG Code Execution
 
-> **Part of the [ResonantGenesis](https://resonant.dev-swat.com) platform** — Isolated code execution, terminal commands, and preview server management.
+> **Part of the [ResonantGenesis](https://dev-swat.com) platform** — Isolated code execution, terminal commands, and preview server management.
 
 [![Status: Production](https://img.shields.io/badge/Status-Production-brightgreen.svg)]()
 [![Port: 8002](https://img.shields.io/badge/Port-8002-orange.svg)]()
@@ -30,4 +30,4 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 - **Volume mounts**: `/var/run/docker.sock`, `/tmp/rg_code_exec`
 
 ---
-**Organization**: [DevSwat-ResonantGenesis](https://github.com/DevSwat-ResonantGenesis) | **Platform**: [resonant.dev-swat.com](https://resonant.dev-swat.com)
+**Organization**: [DevSwat-ResonantGenesis](https://github.com/DevSwat-ResonantGenesis) | **Platform**: [dev-swat.com](https://dev-swat.com)
