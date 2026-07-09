@@ -13,6 +13,17 @@ class PreviewManager:
         self.active_previews: Dict[str, Dict[str, Any]] = {}
         self._port_counter = settings.PREVIEW_PORT_RANGE_START
     
+    def _resolve_project_path(self, project_path: str) -> str:
+        """Refuse to serve/run anything outside the sandbox root."""
+        root = settings.SANDBOX_ROOT
+        os.makedirs(root, exist_ok=True)
+        candidate = os.path.realpath(project_path)
+        if candidate != root and not candidate.startswith(root + os.sep):
+            raise ValueError(f"project_path must resolve under the sandbox root ({root})")
+        if not os.path.isdir(candidate):
+            raise ValueError(f"project_path does not exist: {candidate}")
+        return candidate
+
     def _get_next_port(self) -> int:
         """Get next available port."""
         port = self._port_counter
@@ -28,12 +39,28 @@ class PreviewManager:
         command: Optional[str] = None,
         port: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Start a preview server for a project."""
-        
+        """Start a preview server for a project.
+
+        NOTE: this still spawns the dev-server process directly on this
+        container's host process (unlike CodeExecutor/TerminalExecutor,
+        which now run inside Docker sandboxes) — preview servers need to
+        bind a real port the gateway can reach, and this service doesn't
+        yet have the allowlisted-network sandbox that would require (the
+        same Phase-3-style gap RG_Terminal_Sandbox's own design docs flag
+        as not yet built). This is a known remaining risk, not fully fixed
+        here. The path check below at least stops arbitrary host-path
+        traversal via project_path — auth (see security.py) is the primary
+        mitigation for this endpoint today.
+        """
+        try:
+            project_path = self._resolve_project_path(project_path)
+        except ValueError as e:
+            return {"success": False, "error": str(e), "preview_url": None, "port": port, "process_id": None}
+
         # Stop existing preview if any
         if project_id in self.active_previews:
             await self.stop_preview(project_id)
-        
+
         port = port or self._get_next_port()
         
         # Detect project type and default command

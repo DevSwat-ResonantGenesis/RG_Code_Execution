@@ -261,8 +261,30 @@ class CodeExecutor:
 
 
 class TerminalExecutor:
-    """Executes terminal commands."""
-    
+    """Executes terminal commands inside a locked-down, per-request Docker
+    sandbox — never directly on this container's host process, which has
+    /var/run/docker.sock mounted (needed for CodeExecutor's own Docker
+    invocations). Running arbitrary shell commands directly on that host
+    process meant any caller could pivot to full host root via the mounted
+    socket (e.g. `docker run --privileged -v /:/host`). The sandbox
+    container below does NOT get the socket mounted, so that escape is not
+    reachable even though network access stays enabled (git/npm need it —
+    unlike CodeExecutor's short snippets, terminal commands routinely need
+    to clone/pull/install).
+    """
+
+    SANDBOX_IMAGE = os.getenv("TERMINAL_EXEC_IMAGE", "alpine/git:latest")
+
+    def _resolve_work_dir(self, cwd: Optional[str]) -> str:
+        """Resolve+validate a working directory, refusing to leave SANDBOX_ROOT."""
+        root = settings.SANDBOX_ROOT
+        os.makedirs(root, exist_ok=True)
+        candidate = os.path.realpath(os.path.join(root, cwd.lstrip("/"))) if cwd else root
+        if candidate != root and not candidate.startswith(root + os.sep):
+            raise ValueError(f"cwd must resolve under the sandbox root ({root})")
+        os.makedirs(candidate, exist_ok=True)
+        return candidate
+
     async def execute(
         self,
         command: str,
@@ -270,54 +292,75 @@ class TerminalExecutor:
         timeout: Optional[int] = None,
         env: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
-        """Execute terminal command and return output."""
-        
+        """Execute a terminal command inside an isolated Docker sandbox."""
+
         timeout = timeout or settings.EXECUTION_TIMEOUT
-        work_dir = cwd or os.path.expanduser("~")
-        
-        # Merge environment
-        exec_env = os.environ.copy()
-        if env:
-            exec_env.update(env)
-        
+
         try:
-            process = await asyncio.create_subprocess_shell(
-                command,
+            work_dir = self._resolve_work_dir(cwd)
+        except ValueError as e:
+            return {"success": False, "stdout": "", "stderr": str(e), "exit_code": 1}
+
+        session_id = os.urandom(8).hex()
+        container_name = f"term_exec_{session_id}"
+
+        docker_run_cmd = [
+            "docker", "run", "-d", "--rm", f"--name={container_name}",
+            "--memory=256m", "--memory-swap=256m", "--cpus=0.5", "--pids-limit=100",
+            "--security-opt=no-new-privileges", "--cap-drop=ALL",
+            f"--workdir=/sandbox",
+            f"-v={work_dir}:/sandbox:rw",
+        ]
+        if env:
+            for k, v in env.items():
+                docker_run_cmd += ["-e", f"{k}={v}"]
+        docker_run_cmd += [self.SANDBOX_IMAGE, "sleep", str(timeout + 5)]
+
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *docker_run_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=work_dir,
-                env=exec_env
             )
-            
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout
-                )
-                
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
                 return {
-                    "success": process.returncode == 0,
+                    "success": False, "stdout": "",
+                    "stderr": f"Failed to start sandbox: {stderr.decode(errors='replace')}",
+                    "exit_code": 1,
+                }
+
+            exec_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_name, "sh", "-c", command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(exec_proc.communicate(), timeout=timeout)
+                return {
+                    "success": exec_proc.returncode == 0,
                     "stdout": stdout.decode('utf-8', errors='replace')[:settings.MAX_OUTPUT_SIZE],
                     "stderr": stderr.decode('utf-8', errors='replace')[:settings.MAX_OUTPUT_SIZE],
-                    "exit_code": process.returncode
+                    "exit_code": exec_proc.returncode,
                 }
-                
             except asyncio.TimeoutError:
-                process.kill()
                 return {
-                    "success": False,
-                    "stdout": "",
+                    "success": False, "stdout": "",
                     "stderr": f"Command timed out after {timeout} seconds",
-                    "exit_code": -1
+                    "exit_code": -1,
                 }
-                
         except Exception as e:
-            return {
-                "success": False,
-                "stdout": "",
-                "stderr": str(e),
-                "exit_code": 1
-            }
+            return {"success": False, "stdout": "", "stderr": str(e), "exit_code": 1}
+        finally:
+            try:
+                cleanup = await asyncio.create_subprocess_exec(
+                    "docker", "stop", "-t", "2", container_name,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await cleanup.communicate()
+            except Exception:
+                pass
 
 
 # Global instances

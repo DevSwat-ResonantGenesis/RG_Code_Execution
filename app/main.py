@@ -1,11 +1,12 @@
 # Code Execution Microservice - Main Application
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from .config import settings
-from .routers import code, terminal, preview
+from .security import require_internal_key
+from .routers import code
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,10 +31,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(code.router, prefix="/code", tags=["Code Execution"])
-app.include_router(terminal.router, prefix="/terminal", tags=["Terminal"])
-app.include_router(preview.router, prefix="/preview", tags=["Preview"])
+# /terminal/execute and /preview/* are disabled: they ran arbitrary shell
+# commands directly on this container (which also has /var/run/docker.sock
+# mounted) with no real caller authentication - the chat UI's client calls
+# them without ever sending x-internal-service-key, so require_internal_key
+# never actually gated the traffic that mattered. Only /code/execute (the
+# per-run sandboxed Docker path in executor.py) is mounted now.
+_internal_only = [Depends(require_internal_key)]
+app.include_router(code.router, prefix="/code", tags=["Code Execution"], dependencies=_internal_only)
 
 @app.get("/health")
 async def health_check():
